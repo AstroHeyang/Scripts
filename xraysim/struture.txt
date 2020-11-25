@@ -1,0 +1,347 @@
+# epsim/io/__init__.py
+▼ imports
+    DataARF
+    DataLC
+    DataPHA
+    DataRMF
+    backend
+    np
+    os
+    os
+    path
+
+ +_read_ancillary : function
+
+ +read_arf : function
+
+ +read_lc : function
+
+ +read_pha : function
+
+ +read_rmf : function
+
+▼ variables
+    __all__
+
+
+# epsim/io/backend.py
+▼ imports
+    asc
+    fits
+    np
+    os
+    re
+    string
+
+ +_check_filename : function
+
+ +_find_binary_table : function
+
+ +_find_col_index : function
+
+ +_find_tbl_col : function
+
+ +_get_file_contents : function
+
+ +_get_wcs_key : function
+
+ +_has_hdu : function
+
+ +_has_key : function
+
+ +_is_fits_hudlist : function
+
+ +_is_ogip_type : function
+
+ +_require_col : function
+
+ +_require_key : function
+
+ +_require_vec : function
+
+ +_try_col : function
+
+ +_try_col_or_key : function
+
+ +_try_key : function
+
+ +_try_tbl_col : function
+
+ +_try_vec : function
+
+ +_try_vec_or_key : function
+
+ +get_arf_data : function
+
+ +get_ascii_data : function
+
+ +get_header_data : function
+
+ +get_image_data : function
+
+ +get_lc_data : function
+
+ +get_pha_data : function
+
+ +get_rmf_data : function
+
+ +is_binary_file : function
+
+ +open_fits : function
+
+▼ variables
+    _VLF
+    __all__
+    _new_header
+    _new_table
+    astroFloat
+    astroInt
+    astroUInt
+
+
+# epsim/data.py
+▼ imports
+    astroFloat
+    bool_cast
+    create_expr
+    filter_bins
+    inspect
+    np
+    print_fields
+    sys
+
+▼ BaseData : class
+   +__init__ : function
+   -__str__ : function
+   +_get_filter : function
+   +_get_mask : function
+   +_set_filter : function
+   +_set_mask : function
+   +apply_filter : function
+   +ignore : function
+   +notice : function
+    [variables]
+    filter
+    mask
+
+▼ Data : class
+   +__init__ : function
+   -__repr__ : function
+   +_no_dim_error : function
+   +_no_image_error : function
+   +_wrong_dim_error : function
+   +eval_model : function
+   +eval_model_to_fit : function
+   +get_dep : function
+   +get_dims : function
+   +get_error : function
+   +get_img : function
+   +get_imgerr : function
+   +get_indep : function
+   +get_staterror : function
+   +get_syserror : function
+   +get_x : function
+   +get_x0 : function
+   +get_x0label : function
+   +get_x1 : function
+   +get_x1label : function
+   +get_xerr : function
+   +get_xlabel : function
+   +get_y : function
+   +get_yerr : function
+   +get_ylabel : function
+   +to_contour : function
+   +to_fit : function
+   +to_guess : function
+   +to_plot : function
+
+▼ Data1D : class
+   +__init__ : function
+   +_set_mask : function
+   +get_bounding_mask : function
+   +get_dims : function
+   +get_filter : function
+   +get_filter_expr : function
+   +get_indep : function
+   +get_x : function
+   +notice : function
+    [variables]
+    mask
+
+▼ Data1DInt : class
+   +__init__ : function
+   +_set_mask : function
+   +get_indep : function
+   +get_x : function
+   +get_xerr : function
+   +notice : function
+    [variables]
+    mask
+
+▼ DataND : class
+   +get_dep : function
+   +set_dep : function
+
+▼ NoNewAttributesAfterInit : class
+   -__delattr__ : function
+   +__init__ : function
+   -__setattr__ : function
+    [variables]
+    __initilized
+
+▼ variables
+    __all__
+
+
+# epsim/astrodata.py
+▼ imports
+    BaseData
+    Data1DInt
+    astroFloat
+    bool_cast
+    create_expr
+    filter_bins
+    np
+    print_fields
+
+▼ DataARF : class
+   +__init__ : function
+   -__setstate__ : function
+   -__str__ : function
+   +get_dep : function
+   +get_indep : function
+   +get_xlabel : function
+   +get_ylabel : function
+   +notice : function
+   +specresp : function
+   +specresp : function
+    [variables]
+    doc
+    mask
+
+▼ DataLC : class
+   +__init__ : function
+   -__setstate__ : function
+   -__str__ : function
+   +get_time : function
+   +get_timedel : function
+    [variables]
+    doc
+    mask
+
+▼ DataPHA : class
+   -__getstate__ : function
+   +__init__ : function
+   -__setstate__ : function
+   -__str__ : function
+   +_channel_to_energy : function
+   +_channel_to_wavelength : function
+   +_check_scale : function
+   +_energy_to_channel : function
+   +_fix_background_id : function
+   +_fix_response_id : function
+   +_fix_y_units : function
+   +_get_ebins : function
+   +_get_indep : function
+   +_make_groups : function
+   +_max : function
+   +_middle : function
+   +_min : function
+   +_set_initial_quantity : function
+   +_sum_sq : function
+   +_wavelength_to_channel : function
+   +apply_filter : function
+   +background_ids : function
+   +background_ids : function
+   +delete_background : function
+   +delete_response : function
+   +get_analysis : function
+   +get_areascal : function
+   +get_arf : function
+   +get_background : function
+   +get_background_scale : function
+   +get_backscal : function
+   +get_dep : function
+   +get_filter : function
+   +get_filter_expr : function
+   +get_indep : function
+   +get_mask : function
+   +get_noticed_channels : function
+   +get_noticed_expr : function
+   +get_response : function
+   +get_rmf : function
+   +get_specresp : function
+   +get_x : function
+   +get_xerr : function
+   +get_xlabel : function
+   +get_y : function
+   +get_yerr : function
+   +get_ylabel : function
+   +grouped : function
+   +grouped : function
+   +ignore_bad : function
+   +notice : function
+   +notice_response : function
+   +rate : function
+   +rate : function
+   +response_ids : function
+   +response_ids : function
+   +set_analysis : function
+   +set_arf : function
+   +set_background : function
+   +set_dep : function
+   +set_response : function
+   +set_rmf : function
+   +subtract : function
+   +subtracted : function
+   +subtracted : function
+   +sum_background_data : function
+   +to_guess : function
+   +units : function
+   +units : function
+   +unsubtract : function
+    [variables]
+    _extra_fileds
+    _hc
+    default_background_id
+    doc
+    mask
+    primary_response_id
+
+▼ DataRMF : class
+   +__init__ : function
+   -__setstate__ : function
+   -__str__ : function
+   +get_dep : function
+   +get_indep : function
+   +get_xlabel : function
+   +get_ylabel : function
+    [variables]
+    doc
+    mask
+
+ +_notice_resp : function
+
+
+# epsim/utils/simtools.py
+▼ imports
+    DataARF
+    DataLC
+    DataPHA
+    DataRMF
+    integrate
+    np
+    scipy
+    units
+
+ +calculate_model_flux : function
+
+ +calculate_model_rate : function
+
+ +fakelc : function
+
+ +fakespec : function
+
+ +flux_to_rate : function
+
+ +rate_to_flux : function
