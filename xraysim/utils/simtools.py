@@ -269,50 +269,89 @@ def fakespec(pha=None, arf=None, rmf=None, bkg=None, add_background=True,
     return model_spec
 
 
-def transform_redshift(flux, spec_model, rs_in, rs_out, spec_model_origin=None,
+def transform_redshift(flux, spec_model, rs_in, rs_out,
                        en_low=0.3, en_high=10.0):
     """calculate the flux when one object was moved from z1 to z2
+
+    Notes:
+        Here we assume that the spectrum model and absorption are the same in rs_in and rs_out.
+
+        1. first, we obtain the luminosity integrated from v1(1+rs_in) to v2(1+rs_in) in
+        the rest frame, namely, L1 = 4 * pi * Ld1^2
+        2. second, the luminosity L2, integrated from v1(1+rs_out) to v2(1+rs_out) are
+        calculated, namely,
+        L2 = L1 * [model(v1*(1+rs_out), v2*(1+rs_out)) / model(v1*(1+rs_in), v2*(1+rs_in))]
+        3. finally, we get the flux in the output redshift, namely,
+        flux = L2/(4 * pi * Ld2^2)
+
+        Concretely, here we use two correction factors, one is (Ld1/Ld2)^2, the other is
+        [model(v1*(1+rs_out), v2*(1+rs_out)) / model(v1*(1+rs_in), v2*(1+rs_in))].
 
     Args:
         flux (np.ndarray or float):  flux or flux list;
         spec_model (astropy.model): the spectrum model;
         rs_in (float): input redshift;
         rs_out (float): output redshift;
-        spec_model_origin: spectrum model without absorption;
         en_low (float): energy lower boundary;
         en_high (float): energy upper boundary;
 
     Returns:
-        flux in the output redshift.
+        flux in the output redshift (np.ndarray).
+
+    Todo:
+        Code needs modification if the input and output energy ranges are different.
 
     """
     if not isinstance(flux, np.ndarray):
         flux = np.asarray(flux)
 
     # first, corrected for redshift
-    mo_flux = calculate_model_flux(spec_model, low=en_low, hi=en_high)
     scale_distance = np.square(cosmo.luminosity_distance(rs_in) / cosmo.luminosity_distance(rs_out))
     flux_redshifted = flux * scale_distance.value
-    scale_norm = flux / mo_flux['flux']
 
     # second, corrected for energy band
-    if not spec_model_origin:
-        spec_model_origin = models.PowerLaw1D(x_0=1.0, alpha=2.5, amplitude=1.0, name='main')
-
-    scale_energy = calculate_model_flux(spec_model_origin, en_low * (1 + rs_out), en_high * (1 + rs_out))['flux'] / \
-        calculate_model_flux(spec_model_origin, en_low * (1 + rs_in), en_high * (1 + rs_in))['flux']
+    scale_energy = calculate_model_flux(spec_model, en_low * (1 + rs_out), en_high * (1 + rs_out))['flux'] / \
+        calculate_model_flux(spec_model, en_low * (1 + rs_in), en_high * (1 + rs_in))['flux']
     flux_redshifted *= scale_energy
 
     return flux_redshifted
 
 
-def fakelc(lc_data, modelfunc, rs_in=None, rs_out=None, input_pha=None, input_arf=None,
+def fakelc(lc_data, spec_model, rs_in=None, rs_out=None, input_pha=None, input_arf=None,
            input_rmf=None, input_bkg=None, pha=None, arf=None, rmf=None, bkg=None,
            input_en_lo=0.3, input_en_hi=10.0, output_en_lo=0.3, output_en_hi=10.0,
-           spec_model_origin=None, add_background=True, poisson=True, exposure=0.0):
-    """Generate faked light curves.
-    Note: input_pha, input_arf, input_rmf, input_bkg are necessary only when
-    the input is in units of counts or count rate.
+           add_background=True, poisson=True, exposure=0.0):
+    """ Generate faked light curves.
+
+    Notes:
+        input_pha, input_arf, input_rmf, input_bkg are necessary only when
+        the input is in units of counts or count rate.
+
+    Args:
+        lc_data (class): original light curve data, see DataLC in astrodata.py
+        spec_model (astropy.models, or models likewise): spectrum model, e.g. powerlaw or blackbody
+        rs_in (float): redshift of input lc_data
+        rs_out (float): redshift of output lc_data
+        input_pha: calibration files of input lc_data
+        input_arf: calibration files of input lc_data
+        input_rmf: calibration files of input lc_data
+        input_bkg: calibration files of input lc_data
+        pha: calibration files of output lc_data
+        arf: calibration files of output lc_data
+        rmf: calibration files of output lc_data
+        bkg: calibration files of output lc_data
+        input_en_lo (float): energy lower boundary of input lc_data
+        input_en_hi (float): energy upper boundary of input lc_data
+        output_en_lo (float): energy lower boundary of output lc_data
+        output_en_hi (float): energy upper boundary of output lc_data
+        spec_model_origin (astropy.models, or models likewise): spectral model with no absorption
+        add_background (bool): add background or not
+        poisson (bool): using poisson or not
+        exposure (np.ndarray or float): exposure time of this light curve
+
+    Returns:
+        faked light curve data (dict): {'time':ndarray, 'timedel':ndarray,
+        'bkg_counts': ndarray, 'counts': ndarray, 'rate':ndarray}
 
     """
     if arf is None and pha is None:
@@ -330,7 +369,7 @@ def fakelc(lc_data, modelfunc, rs_in=None, rs_out=None, input_pha=None, input_ar
     res = {}
     if lc_data.flux is not None:
         flux_raw = lc_data.flux
-        flux = transform_redshift(flux_raw, modelfunc, rs_in, rs_out, spec_model_origin=spec_model_origin,
+        flux = transform_redshift(flux_raw, spec_model, rs_in, rs_out,
                                   en_low=input_en_lo, en_high=input_en_hi)
 
     # TODO: if lc_data.counts, these should be modified for redshift correction.
@@ -342,7 +381,7 @@ def fakelc(lc_data, modelfunc, rs_in=None, rs_out=None, input_pha=None, input_ar
     else:
         print("Error: No counts/rate/flux column is found in the lc file")
 
-    ctr = flux_to_rate(flux, modelfunc,
+    ctr = flux_to_rate(flux, spec_model,
                        pha=pha, arf=arf, rmf=rmf,
                        input_en_lo=input_en_lo,
                        input_en_hi=input_en_hi,
@@ -364,13 +403,10 @@ def fakelc(lc_data, modelfunc, rs_in=None, rs_out=None, input_pha=None, input_ar
         # exposure time
         bkg_rate = bkg.get_dep() * 1.0E6 / bkg.exposure
 
-        """
         if poisson:
             bkg_rate = np.random.poisson(bkg_rate)
-        """
 
         bkg_rate = bkg_rate * 1.0E-6  # if pha and bkg are not the same, then /bkg.get_backscal()
-        # test1 = bkg.get_backscal()
 
         if rmf is not None:
             en = (rmf.e_min + rmf.e_max) / 2.0
@@ -383,12 +419,11 @@ def fakelc(lc_data, modelfunc, rs_in=None, rs_out=None, input_pha=None, input_ar
         bkg_rate = 0.0
 
     res['bkg_counts'] = np.ones_like(res['timedel'])
-    # test2 = res['bkg_counts'] * res['timedel'] * np.sum(bkg_rate)
     res['bkg_counts'] = res['bkg_counts'] * res['timedel'] * np.sum(bkg_rate)
 
     if poisson:
         res['bkg_counts'] = np.random.poisson(res['bkg_counts'])
-        res['counts'] = np.random.poisson(np.asarray(ctr) * res['timedel'] + res['bkg_counts'])
+        res['counts'] = np.random.poisson(np.asarray(ctr) * res['timedel']) + res['bkg_counts']
     else:
         res['counts'] = ctr * res['timedel'] + res['bkg_counts']
 

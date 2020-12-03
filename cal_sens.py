@@ -16,6 +16,22 @@ from astropy.io import ascii as asc
 from astropy.coordinates import SkyCoord
 from gdpyc import GasMap
 from tqdm import tqdm
+from astropy.stats import bayesian_blocks
+from matplotlib import pyplot as plt
+
+""" The script is used to calculate the maximum redshift that one transient could be detected.
+
+    Input： 
+        The original light curve of the observed source.
+    Output:
+        The maximum redshift that the object can be detected using XMM-Newton.
+         
+    The procedures are described as follows.
+    1. generate fake light curves with different xmm newton calibration files at 
+    different redshifts.
+    2. calculate the maximum redshift where the transients can be detected.
+
+"""
 
 
 class GetResp(object):
@@ -155,6 +171,76 @@ def generate_lc(satellite: str, instrument: str, filter_name: str, ao: int,
     return lc_pn
 
 
+def lc_rebin(lc: dict) -> dict:
+    """The generated light curve are binned such that each bin contains at least 25 counts.
+
+    Args:
+        lc: see the args in 'generate_lc'
+
+    Returns:
+        lc_binned: the structure are the same as lc
+
+    """
+    counts_series = lc['counts']
+    time_delta_series = lc['timedel']
+    counts_bkg_series = lc['bkg_counts']
+
+    time_series_new = []
+    time_delta_series_new = []
+    counts_series_new = []
+    counts_bkg_series_new = []
+
+    counts_current = 0
+    index_list = [0]
+
+    for i, counts in enumerate(counts_series):
+        if counts_current >= 25:
+            index_list.append(i+1)
+            counts_current = 0
+        else:
+            counts_current += counts_series[i]
+
+    # remove the last index if counts_series[index_last:] < 25
+    if np.sum(counts_series[index_list[-1]:]) < 25:
+        index_list.pop()
+
+    index_list.append(-1)
+
+    for j in range(len(index_list)-1):
+        time_series_new.append(np.sum(time_delta_series[:index_list[j+1]]))
+        time_delta_series_new.append(np.sum(time_delta_series[index_list[j]:index_list[j+1]]))
+        counts_series_new.append(np.sum(counts_series[index_list[j]:index_list[j+1]]))
+        counts_bkg_series_new.append(np.sum(counts_bkg_series[index_list[j]:index_list[j+1]]))
+
+    lc_binned = {'time': np.array(time_series_new),
+                 'timedel': np.array(time_delta_series_new),
+                 'bkg_counts': np.array(counts_bkg_series_new),
+                 'counts': np.array(counts_series_new),
+                 'rate': np.array(counts_series_new)/np.array(time_delta_series_new)}
+
+    return lc_binned
+
+
+def plot_lc(lc: dict):
+    """Plot the generated light curve
+
+    Args:
+        lc: see the args in 'generate_lc'.
+
+    Returns:
+        None
+    """
+    time = lc['time']
+    flux = lc['rate']
+    font0 = {'family': 'Times New Roman', 'weight': 'normal', 'size': 15}
+    plt.figure(figsize=(9, 6))
+    plt.grid(True, ls='--')
+    plt.plot(time, flux, '-o', alpha=0.7, mfc='black', linewidth=3)
+    plt.xlabel('Time (s)', font0)
+    plt.ylabel('Count Rate (count s$^{-1}$ )', font0)
+    plt.show()
+
+
 def cal_flux(flux_s: float, flux_e: float, exposure: float, model: classmethod,
              pha=None, arf=None, rmf=None, bkg=None, mo_en_low=0.5, mo_en_hi=2.0,
              LiMa=True) -> float:
@@ -234,13 +320,22 @@ def get_random_lb(threshold: float) -> tuple:
         raise ValueError("The threshold should be less than 90!")
     l = random.uniform(0, 360)
     b = np.random.choice([random.uniform(90-threshold, 90),
-                               random.uniform(-90, -90+threshold)])
+                          random.uniform(-90, -90+threshold)])
     return l, b
 
 
 def cal_redshift(lc_file: str, rs_in: float, satellite=None, instrument=None,
                  filter_name=None, ao=None, LiMa=True) -> float:
     """Roughly find the maximum redshift where the source just could be detected.
+
+    Notes:
+        Here we use both of these two criteria described in Alp & Larsson (2020), Appendix A.2
+        1. The ratio of the maximum background-subtracted flux bin over the 50th flux
+        percentile (i.e., percentile of the bins weighted by time for this individual
+        light curve) is larger than 3, while the signal-to-background ratio (S/B) is
+        higher than 10 at the time of peak flux.
+        2. Same as above, but with a peak flux a factor of 5 above the 50th percentile
+        and an S/B of at least 3.
 
     Args:
         lc_file: observed or faked light curve
@@ -269,9 +364,37 @@ def cal_redshift(lc_file: str, rs_in: float, satellite=None, instrument=None,
 
         fake_lc = generate_lc(satellite, instrument, filter_name, ao, lc_file=lc_file,
                               coordinates=(l, b), rs_in=rs_in, rs_out=rs)
+        fake_lc_binned = lc_rebin(fake_lc)
+        cts = fake_lc_binned['counts']
+        cts_bkg = fake_lc_binned['bkg_counts']
+        cts_net = cts - cts_bkg
+        time_delta_series = fake_lc_binned['timedel']
+        time_series = fake_lc_binned['time']
+        count_rate_net = cts_net / time_delta_series
+
+        if len(cts_net) < 3:
+            return rs
+
+        count_rate_50_percentile = np.percentile(count_rate_net, 50, interpolation='midpoint')
+        index_max = np.argmax(count_rate_net)
+        snr_maximum_flux_bin = cts[index_max] / cts_bkg[index_max]
+        criterion1 = (np.max(count_rate_net) >= 3*count_rate_50_percentile) and \
+            snr_maximum_flux_bin >= 10
+        criterion2 = (np.max(count_rate_net) >= 5*count_rate_50_percentile) and \
+            snr_maximum_flux_bin >= 3
+
         cts_bkg = np.sum(fake_lc['bkg_counts'])
         cts_total = np.sum(fake_lc['counts'])
-        cts_5sig = poisson.ppf(0.999999, cts_bkg)
+        sn = (cts_total - cts_bkg) / np.sqrt(cts_total + cts_bkg)
+        print(f"Z: {rs}, SNR: {sn}，bkg counts:{cts_bkg}, total counts: {cts_total}")
+        print(f"SNR of max flux bin: {snr_maximum_flux_bin}, "
+              f"max/median count rate: {np.max(count_rate_net)/count_rate_50_percentile}, "
+              f"number of bins: {len(count_rate_net)}")
+
+        if not (criterion1 or criterion2):
+            print('=========================================================')
+            print(cts_net)
+            return rs
 
         """
         res = fakespec(pha=pha, arf=arf, rmf=rmf, bkg=bkg,
@@ -288,6 +411,7 @@ def cal_redshift(lc_file: str, rs_in: float, satellite=None, instrument=None,
         # Two methods to calculate the detection
         # 1. Li-Ma equation
         # 2. Poisson statistic
+        """
         if LiMa:
             sn = (cts_total - cts_bkg) / np.sqrt(cts_total + cts_bkg)
             print(f"Z: {rs}, SNR: {sn}，bkg counts:{cts_bkg}, total counts: {cts_total}")
@@ -297,6 +421,7 @@ def cal_redshift(lc_file: str, rs_in: float, satellite=None, instrument=None,
             print(f"Z: {rs}, total counts: {cts_total}")
             if cts_total < cts_5sig or cts_total <= 100:
                 return rs
+        """
 
 
 if __name__ == '__main__':
@@ -345,12 +470,18 @@ if __name__ == '__main__':
     pha, arf, rmf, bkg = GetResp(satellite=satellite, instrument=instrument,
                                  filter_name=filter_name, ao=ao).response
 
+    lc = generate_lc(satellite, instrument, filter_name, ao, rs_in=rs_in,
+                     rs_out=0.5, lc_file=lc_file)
+    lc_binned = lc_rebin(lc)
+    # plot_lc(lc_binned)
+
     rs = cal_redshift(lc_file, rs_in, satellite=satellite, instrument=instrument,
                       filter_name=filter_name, ao=ao)
     time_end = time.time()
     print(rs)
     time_delta = time_end - time_start
     print(f'Times Used: {time_delta} s')
+
     """
     # a list of exposures
     exps = np.logspace(2.0, 5.0, 100)
