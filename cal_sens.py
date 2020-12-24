@@ -1,5 +1,6 @@
 import argparse
 import numpy as np
+import pandas as pd
 import os
 import glob
 import random
@@ -8,15 +9,16 @@ import time
 from scipy.stats import poisson
 from astropy.cosmology import WMAP9 as cosmo
 from astropy import units as u
+from astropy.io import ascii as asc
+from astropy.coordinates import SkyCoord
+from astropy.stats import bayesian_blocks
+from astropy.table import Table
 from xraysim import models as mo
 from xraysim.astroio.read_data import read_arf, read_rmf, read_pha, read_lc
 from xraysim.utils.simtools import fakespec
 from xraysim.utils import simtools
-from astropy.io import ascii as asc
-from astropy.coordinates import SkyCoord
 from gdpyc import GasMap
 from tqdm import tqdm
-from astropy.stats import bayesian_blocks
 from matplotlib import pyplot as plt
 
 """ The script is used to calculate the maximum redshift that one transient could be detected.
@@ -107,7 +109,7 @@ class GetResp(object):
 
 def generate_lc(satellite: str, instrument: str, filter_name: str, ao: int,
                 nh_gal=None, nh_host=None, coordinates=None, rs_in=0.0, rs_out=0.0,
-                lc_file=None) -> dict:
+                lc_file=None, bkg_rate=0.0) -> dict:
     """
 
     Args:
@@ -115,7 +117,8 @@ def generate_lc(satellite: str, instrument: str, filter_name: str, ao: int,
         instrument: Name of the instrument, e.g., pn, mos1, mos2
         filter_name: Name of the filter, e.g., thick, thin, med
         ao: Name of the Announcement of Opportunity, e.g, 19
-        nh: column density, in unit of 1e22 cm^-2
+        nh_gal: The Galactic column density, in unit of 1e22 cm^-2
+        nh_host: The host galaxy column density, in unit of 1e22 cm^-2
         coordinates: Galactic coordinates, (l, b), in units of degrees
         rs_in: input redshift
         rs_out: output redshift
@@ -166,22 +169,29 @@ def generate_lc(satellite: str, instrument: str, filter_name: str, ao: int,
 
     lc_pn = simtools.fakelc(snb_lc, mo_spec.model, rs_in=rs_in, rs_out=rs_out, input_pha=pha,
                             input_arf=arf, input_rmf=rmf, input_bkg=bkg, pha=pha,
-                            rmf=rmf, arf=arf, bkg=bkg)
+                            rmf=rmf, arf=arf, bkg=bkg, bkg_rate=bkg_rate)
 
     return lc_pn
 
 
-def lc_rebin(lc: dict) -> dict:
-    """The generated light curve are binned such that each bin contains at least 25 counts.
+def lc_rebin(lc: dict, bin_method=None, bin_size=1, count_rate_bkg=0.) -> dict:
+    """The generated light curve are binned such that each bin contains m seconds or n counts.
+        n = [60, 800, 12, 160, 8, 400, 48, 400, 160, 160, 24, 8], see Figure 1 in
+        Alp & Larsson (2020)
 
     Args:
         lc: see the args in 'generate_lc'
+        bin_method (str): fixed or dynamic bin_size; if fixed, to keep each bin contains
+            the same (default 25) counts; if dynamic, the bin size are the same as in the
+            article (Alp & Larsson 2020).
+        bin_size (int): fixed bin size
 
     Returns:
         lc_binned: the structure are the same as lc
 
     """
     counts_series = lc['counts']
+    time_series = lc['time']
     time_delta_series = lc['timedel']
     counts_bkg_series = lc['bkg_counts']
 
@@ -190,55 +200,106 @@ def lc_rebin(lc: dict) -> dict:
     counts_series_new = []
     counts_bkg_series_new = []
 
-    counts_current = 0
-    index_list = [0]
+    if bin_method == 'dynamic':
+        counts_current = 0
+        index_list = [0]
+        counts_threshold = 25
 
-    for i, counts in enumerate(counts_series):
-        if counts_current >= 25:
-            index_list.append(i+1)
-            counts_current = 0
-        else:
-            counts_current += counts_series[i]
+        for i, counts in enumerate(counts_series):
+            if counts_current >= 25:
+                index_list.append(i + 1)
+                counts_current = 0
+            else:
+                counts_current += counts_series[i]
 
-    # remove the last index if counts_series[index_last:] < 25
-    if np.sum(counts_series[index_list[-1]:]) < 25:
-        index_list.pop()
+        # remove the last index if counts_series[index_last:] < counts_threshold (default 25)
+        if np.sum(counts_series[index_list[-1]:]) < counts_threshold:
+            index_list.pop()
 
-    index_list.append(-1)
+        index_list.append(-1)
 
-    for j in range(len(index_list)-1):
-        time_series_new.append(np.sum(time_delta_series[:index_list[j+1]]))
-        time_delta_series_new.append(np.sum(time_delta_series[index_list[j]:index_list[j+1]]))
-        counts_series_new.append(np.sum(counts_series[index_list[j]:index_list[j+1]]))
-        counts_bkg_series_new.append(np.sum(counts_bkg_series[index_list[j]:index_list[j+1]]))
+        for j in range(len(index_list) - 1):
+            time_series_new.append(np.sum(time_delta_series[:index_list[j + 1]]))
+            time_delta_series_new.append(np.sum(time_delta_series[index_list[j]:index_list[j + 1]]))
+            counts_series_new.append(np.sum(counts_series[index_list[j]:index_list[j + 1]]))
+            counts_bkg_series_new.append(np.sum(counts_bkg_series[index_list[j]:index_list[j + 1]]))
+
+    if bin_method == 'fixed':
+        i, time_in_bin, time_current, index_pre = 0, 0, 0, 0
+        while i < len(time_series):
+            if i < len(time_series):
+                if time_in_bin < bin_size:
+                    time_in_bin += time_delta_series[i]
+                    time_current += time_delta_series[i]
+                else:
+                    time_series_new.append(time_current)
+                    time_delta_series_new.append(time_in_bin)
+                    counts_series_new.append(np.sum(counts_series[index_pre:i]))
+                    counts_bkg_series_new.append(np.sum(np.sum(counts_bkg_series[index_pre:i])))
+                    index_pre = i
+                    time_in_bin = 0
+            else:
+                time_in_bin += time_delta_series[i]
+                time_current += time_delta_series[i]
+                time_series_new.append(time_current)
+                time_delta_series_new.append(time_in_bin)
+                counts_series_new.append(np.sum(counts_series[index_pre:]))
+                counts_bkg_series_new.append(np.sum(np.sum(counts_bkg_series[index_pre:])))
+            i += 1
 
     lc_binned = {'time': np.array(time_series_new),
                  'timedel': np.array(time_delta_series_new),
                  'bkg_counts': np.array(counts_bkg_series_new),
                  'counts': np.array(counts_series_new),
-                 'rate': np.array(counts_series_new)/np.array(time_delta_series_new)}
+                 'rate': np.array(counts_series_new) / np.array(time_delta_series_new)}
 
     return lc_binned
 
 
-def plot_lc(lc: dict):
+def plot_lc(lc: dict, save_fig=False, file_name=None):
     """Plot the generated light curve
+
+    Notes:
+        plot the raw light curve and a new one that were binned to five data points.
 
     Args:
         lc: see the args in 'generate_lc'.
+        save_fig: whether save the figure or not.
+        file_name: the name of the figure to be saved.
 
     Returns:
         None
     """
-    time = lc['time']
-    flux = lc['rate']
+    time_raw = lc['time']
+    flux_raw = lc['rate']
+    time_delta = lc['timedel']
+
+    """
+    bin_size = 5
+    step = len(time_raw)//bin_size
+    time_binned = []
+    flux_binned = []
+    for i in range(bin_size):
+        if i < bin_size-1:
+            time_binned.append((time_raw[step*i] + time_raw[step*(i+1)]) // 2)
+            flux_binned.append(np.sum(time_delta[step*i:step*(i+1)] * flux_raw[step*i:step*(i+1)])
+                               / np.sum(time_delta[step*i: step*(i+1)]))
+        else:
+            time_binned.append((time_raw[step*i] + time_raw[-1]) // 2)
+            flux_binned.append(np.sum(time_delta[step*i:] * flux_raw[step*i:])
+                               / np.sum(time_delta[step*i:]))
+    """
+
     font0 = {'family': 'Times New Roman', 'weight': 'normal', 'size': 15}
     plt.figure(figsize=(9, 6))
     plt.grid(True, ls='--')
-    plt.plot(time, flux, '-o', alpha=0.7, mfc='black', linewidth=3)
+    plt.plot(time_raw, flux_raw, '-o', alpha=0.7, mfc='black', linewidth=3)
+    # plt.plot(time_binned, flux_binned, '-o', alpha=0.7, mfc='red', linewidth=3, label='Binned')
     plt.xlabel('Time (s)', font0)
     plt.ylabel('Count Rate (count s$^{-1}$ )', font0)
-    plt.show()
+    # plt.legend(loc='best')
+    if save_fig:
+        plt.savefig(file_name, dpi=1200, bbox_inch='tight')
 
 
 def cal_flux(flux_s: float, flux_e: float, exposure: float, model: classmethod,
@@ -311,7 +372,8 @@ def get_random_lb(threshold: float) -> tuple:
     """
 
     Args:
-        threshold: to avoid the Galactic plane, generally we select objects with |b|> threshold
+        threshold: sometimes we want to select objects out of the Galactic plane, here we select
+        sky regions with |b|> threshold
 
     Returns:
         coordinates randomly generated ([l, b])
@@ -319,13 +381,73 @@ def get_random_lb(threshold: float) -> tuple:
     if np.abs(threshold) >= 90:
         raise ValueError("The threshold should be less than 90!")
     l = random.uniform(0, 360)
-    b = np.random.choice([random.uniform(90-threshold, 90),
-                          random.uniform(-90, -90+threshold)])
+    b = np.random.choice([random.uniform(90 - threshold, 90),
+                          random.uniform(-90, -90 + threshold)])
     return l, b
 
 
+def get_bkg_count_rate(instrument: str, filter_name=None, threshold=15, radius=1):
+    """
+
+    Args:
+        instrument: pn, mos1, or mos2.
+        filter_name: thin, thick, or medium.
+        threshold: see function 'get_random_lb', default is 15 degree.
+        radius: the radius of source region, default is 1 arcmin.
+
+    Returns:
+        mean, sigma of the background count rates
+    """
+
+    dir_bkg = './background/'
+    if instrument == 'pn':
+        path_bkg = dir_bkg + 'PN_bkg_info.txt'
+    elif instrument == 'mos1':
+        path_bkg = dir_bkg + 'MOS1_bkg_info.txt'
+    elif instrument == 'mos2':
+        path_bkg = dir_bkg + 'MOS2_bkg_info.txt'
+    else:
+        print('Error! The instrument should be pn, mos1, or mos2!')
+        raise NameError
+
+    bkg = Table.read(path_bkg, format='ascii')
+    column_names = bkg.colnames
+    bkg_dict = {}
+    for i in column_names:
+        bkg_dict[i] = np.array(bkg[i])
+    df_bkg = pd.DataFrame(bkg_dict)
+    df_bkg_full_window = df_bkg[df_bkg['SUBMODE'] != 'PrimeSmallWindow'].reset_index()
+
+    # remove those with |b| < threshold, in unit of degree.
+    lb = SkyCoord(df_bkg_full_window['ra_Deg']*u.degree,
+                  df_bkg_full_window['dec_Deg']*u.degree,
+                  frame='icrs').galactic
+    l, b = lb.l.value, lb.b.value
+    df_bkg_full_window_new = pd.concat([df_bkg_full_window,
+                                        pd.DataFrame({"l_deg": l,
+                                                      "b_deg": b})],
+                                       axis=1, join='outer')
+    df_bkg_full_window_new2 = df_bkg_full_window_new.drop(
+        df_bkg_full_window_new[np.abs(df_bkg_full_window_new['b_deg']) <= threshold].index)
+
+    # depend on filter_name
+    if filter_name == 'medium':
+        count_rate_bkg_raw = df_bkg_full_window_new2[df_bkg_full_window_new['FILTER'] == 'Medium']
+    elif filter_name == 'thin':
+        count_rate_bkg_raw = df_bkg_full_window_new2[df_bkg_full_window_new['FILTER'] == 'Thin1']
+    else:
+        count_rate_bkg_raw = df_bkg_full_window_new2
+
+    radius_scaling_factor = np.square(count_rate_bkg_raw['radius_arcmin'] / radius)
+    count_rate_bkg_mean = np.mean(count_rate_bkg_raw['count_rate'] / radius_scaling_factor)
+    count_rate_bkg_sigma = np.std(count_rate_bkg_raw['count_rate'] / radius_scaling_factor)
+
+    return count_rate_bkg_mean, count_rate_bkg_sigma
+
+
 def cal_redshift(lc_file: str, rs_in: float, satellite=None, instrument=None,
-                 filter_name=None, ao=None, LiMa=True) -> float:
+                 filter_name=None, ao=None, LiMa=True, bin_size=1,
+                 save_res=False, plot_res=False) -> float:
     """Roughly find the maximum redshift where the source just could be detected.
 
     Notes:
@@ -344,27 +466,30 @@ def cal_redshift(lc_file: str, rs_in: float, satellite=None, instrument=None,
         instrument (str): the name of instrument, e.g, 'pn', 'mos1', 'mos2'
         filter_name (str): e.g., 'thick-5'
         ao (int): e.g., 7, 8, 10, 13, 14 , 18, 19
-        in_en_low (float): the lower energy boundary to calculate the luminosity
-        in_en_hi (float): the upper energy boundary to calculate the luminosity
-        mo_en_low (float): the lower energy boundary to calculate the sensitivity
-        mo_en_hi (float): the upper energy boundary to calculate the sensitivity
+        LiMa: use LiMa formula to calculate the S/N or not
+        bin_size: the bin size when rebin the light curve
+        save_res: save the light curve at the maximum redshift or not
+        plot_res: plot the light curve at the maximum redshift or not
 
     Returns:
         redshift: the redshift when the signal to noise ratio only just greater than 5
-        and the counts greater than 100.
+        and the peak flux greater than two times of the mean.
     """
-    rs_min = 0.001
-    rs_max = 2.0
+    rs_min = 0.01
+    rs_max = 2.5
 
     rs_list = np.linspace(rs_min, rs_max, num=200, endpoint=True)
 
     l, b = get_random_lb(15)  # |b| > 15 degree
+    cts_bkg_mean, cts_bkg_sigma = get_bkg_count_rate(instrument, filter_name)
+    count_rate_bkg = np.random.normal(cts_bkg_mean, cts_bkg_sigma)
 
     for rs in tqdm(rs_list):
-
         fake_lc = generate_lc(satellite, instrument, filter_name, ao, lc_file=lc_file,
-                              coordinates=(l, b), rs_in=rs_in, rs_out=rs)
-        fake_lc_binned = lc_rebin(fake_lc)
+                              coordinates=(l, b), rs_in=rs_in, rs_out=rs,
+                              bkg_rate=count_rate_bkg)
+        fake_lc_binned = lc_rebin(fake_lc, bin_method='fixed', bin_size=bin_size,
+                                  count_rate_bkg=count_rate_bkg)
         cts = fake_lc_binned['counts']
         cts_bkg = fake_lc_binned['bkg_counts']
         cts_net = cts - cts_bkg
@@ -372,29 +497,44 @@ def cal_redshift(lc_file: str, rs_in: float, satellite=None, instrument=None,
         time_series = fake_lc_binned['time']
         count_rate_net = cts_net / time_delta_series
 
-        if len(cts_net) < 3:
-            return rs
+        # here we adopt background counts, but not bkg counts derived from the calibration files.
+        cts_bkg_observed = count_rate_bkg * np.sum(time_delta_series)
+        cts_total = np.sum(cts_net) + cts_bkg_observed
+        if LiMa:
+            sn = (cts_total - cts_bkg_observed) / np.sqrt(cts_total + cts_bkg_observed)
+        else:
+            # here times 5, in order to be consistent with LiMa
+            sn = cts_total*5/poisson.ppf(0.999999, cts_bkg_observed)
 
-        count_rate_50_percentile = np.percentile(count_rate_net, 50, interpolation='midpoint')
-        index_max = np.argmax(count_rate_net)
-        snr_maximum_flux_bin = cts[index_max] / cts_bkg[index_max]
-        criterion1 = (np.max(count_rate_net) >= 3*count_rate_50_percentile) and \
-            snr_maximum_flux_bin >= 10
-        criterion2 = (np.max(count_rate_net) >= 5*count_rate_50_percentile) and \
-            snr_maximum_flux_bin >= 3
+        criterion1 = (np.max(cts_net/time_delta_series) - 2*np.mean(cts_net/time_delta_series) >= 0)
+        criterion2 = (sn > 5)
+        print(' ')
+        print(f"Z: {rs}, SNR: {sn}，bkg counts:{cts_bkg_observed}, total counts: {cts_total}, "
+              f"net counts: {cts_total-cts_bkg_observed}")
+        print(f"number of bins: {len(count_rate_net)}")
 
-        cts_bkg = np.sum(fake_lc['bkg_counts'])
-        cts_total = np.sum(fake_lc['counts'])
-        sn = (cts_total - cts_bkg) / np.sqrt(cts_total + cts_bkg)
-        print(f"Z: {rs}, SNR: {sn}，bkg counts:{cts_bkg}, total counts: {cts_total}")
-        print(f"SNR of max flux bin: {snr_maximum_flux_bin}, "
-              f"max/median count rate: {np.max(count_rate_net)/count_rate_50_percentile}, "
-              f"number of bins: {len(count_rate_net)}")
+        if not (criterion1 and criterion2):
+            res = np.sum(cts_net)
+            print(res)
+            path = './fake_lc'
+            path_csv = path + '/' + lc_file[lc_file.index('0'):-4] + f'_{instrument}_' + \
+                       f'{filter_name}_' + 'ao_' + str(ao) + '.csv'
 
-        if not (criterion1 or criterion2):
+            path_img = path + '/' + lc_file[lc_file.index('0'):-4] + f'_{instrument}_' + \
+                       f'{filter_name}_' + 'ao_' + str(ao) + '.jpg'
+            if save_res:
+                pd.DataFrame(fake_lc_binned).to_csv(path_csv)
+            if plot_res:
+                plot_lc(fake_lc_binned, save_fig=True, file_name=path_img)
+
+            return rs, res
+
+        """
+        if not criterion1:
             print('=========================================================')
-            print(cts_net)
+            print(count_net_net)
             return rs
+        """
 
         """
         res = fakespec(pha=pha, arf=arf, rmf=rmf, bkg=bkg,
@@ -435,9 +575,9 @@ if __name__ == '__main__':
                                                                             "Default is xmm_newton")
     parser.add_argument("--instrument", type=str, default='pn', help="Name of the instrument, e.g., pn, "
                                                                      "mos1, or mos2. Default is pn.")
-    parser.add_argument("--filter_name", type=str, default='thick-5', help="Filter in use. e.g., thin, "
-                                                                           "med, or thick. "
-                                                                           "Default is thick-5.")
+    parser.add_argument("--filter_name", type=str, default='thin-5', help="Filter in use. e.g., thin, "
+                                                                          "med, or thick. "
+                                                                          "Default is thick-5.")
     parser.add_argument("--ao", type=int, default=19, help="Name of the Announcement of Opportunity, "
                                                            "e.g., 17, 18, 19, 20. Default is 19.")
     parser.add_argument("--en_low", type=float, default=0.3, help="Lower limit for the energy range. "
@@ -453,8 +593,8 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
-    lc_file = args.lc_file
-    rs_in = args.rs_in
+    # lc_file = args.lc_file
+    # rs_in = args.rs_in
     satellite = args.satellite
     instrument = args.instrument
     filter_name = args.filter_name
@@ -465,52 +605,56 @@ if __name__ == '__main__':
     mo_en_low = args.mo_en_low
     mo_lumi = args.mo_lumi
 
+    paths = glob.glob('./lc/*.txt')
+    paths.sort()
+    rs_list = [1.17, 0.5, 0.3, 0.3, 0.37, 0.13, 0.095, 0.57, 0.48, 0.3, 0.62, 0.29]
+    rs_out = []
     time_start = time.time()
-    # load the calibration matrix
-    pha, arf, rmf, bkg = GetResp(satellite=satellite, instrument=instrument,
-                                 filter_name=filter_name, ao=ao).response
+    # z = get_bkg_count_rate(instrument, filter_name)
 
-    lc = generate_lc(satellite, instrument, filter_name, ao, rs_in=rs_in,
-                     rs_out=0.5, lc_file=lc_file)
-    lc_binned = lc_rebin(lc)
-    # plot_lc(lc_binned)
+    """
+    # check the data, to ensure the simulated counts are consistent with the original one
+    for lc_file, rs_in in zip(paths, rs_list):
+        # load the calibration matrix
+        print('---------------------------')
+        print(lc_file)
+        lc_raw = read_lc(lc_file)
+        counts_raw = np.sum(lc_raw.counts)
+        # set negative flux to zero
+        negative_index = np.where(lc_raw.counts < 0.0)[0]
+        lc_raw.counts[negative_index] = 0.0
+        tem = np.sum(lc_raw.counts)
+        print(f"counts of raw lc: {np.sum(lc_raw.counts)}")
 
-    rs = cal_redshift(lc_file, rs_in, satellite=satellite, instrument=instrument,
-                      filter_name=filter_name, ao=ao)
+        pha, arf, rmf, bkg = GetResp(satellite=satellite, instrument=instrument,
+                                     filter_name=filter_name, ao=ao).response
+
+        lc = generate_lc(satellite, instrument, filter_name, ao, rs_in=rs_in,
+                         rs_out=rs_in, lc_file=lc_file)
+        lc_binned = lc_rebin(lc)
+        rs = cal_redshift(lc_file, rs_in, satellite=satellite, instrument=instrument,
+                          filter_name=filter_name, ao=ao)
+        print(f"counts of generated lc: {rs}")
+
+    """
+    bin_sizes = [60, 800, 12, 160, 8, 400, 48, 400, 160, 160, 24, 8]
+    for lc_file, rs_in, bin_size in zip(paths, rs_list, bin_sizes):
+
+        # load the calibration matrix
+        pha, arf, rmf, bkg = GetResp(satellite=satellite, instrument=instrument,
+                                     filter_name=filter_name, ao=ao).response
+
+        # lc = generate_lc(satellite, instrument, filter_name, ao, rs_in=rs_in,
+        #                 rs_out=0.5, lc_file=lc_file)
+        # lc_binned = lc_rebin(lc)
+
+        rs = cal_redshift(lc_file, rs_in, satellite=satellite, instrument=instrument,
+                          filter_name=filter_name, ao=ao, bin_size=bin_size,
+                          save_res=True, plot_res=True)
+        rs_out.append(rs)
+
+    print('finished!')
+    print(rs_out)
     time_end = time.time()
-    print(rs)
     time_delta = time_end - time_start
     print(f'Times Used: {time_delta} s')
-
-    """
-    # a list of exposures
-    exps = np.logspace(2.0, 5.0, 100)
-
-    # Define model and set up the parameter values
-    mo_pl = mo.PLSpec(nh=0.03, rs=0.0, alpha=1.7)
-    mo_bb = mo.BBSpec(nh=0.03, rs=0.0, temperature=100.0)
-    
-    # loop through a list of exposure time
-    for exp in exps:
-        flux_min = 1.0E-20
-        flux_max = 5.0E-4
-
-        # Calculate the detection flux limit for a give exposure time exp and
-        # instrument
-        flux = cal_flux(flux_min, flux_max, exp, mo_pl, pha=pha, arf=arf,
-                        rmf=rmf, bkg=bkg, mo_en_low=mo_en_low,
-                        mo_en_hi=mo_en_hi, LiMa=False)
-
-        print("Exposure: %.3f, detection flux limit: %.3e" % (exp, flux))
-
-        # Calculate the maximum redshift at a given luminosity for a particular
-        # model and instrument
-        rs = cal_redshift(mo_lumi, exp, mo_bb, pha=pha, arf=arf, rmf=rmf,
-                          bkg=bkg, in_en_low=en_low, in_en_hi=en_hi,
-                          mo_en_low=mo_en_low, mo_en_hi=mo_en_hi)
-
-        print("Exposure: %.3f, detection flux limit: %.3e, luminosity: %.3e, "
-              "maximum redshift: %.3f" % (exp, flux, mo_lumi, rs))
-    """
-
-

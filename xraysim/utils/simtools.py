@@ -320,7 +320,7 @@ def transform_redshift(flux, spec_model, rs_in, rs_out,
 def fakelc(lc_data, spec_model, rs_in=None, rs_out=None, input_pha=None, input_arf=None,
            input_rmf=None, input_bkg=None, pha=None, arf=None, rmf=None, bkg=None,
            input_en_lo=0.3, input_en_hi=10.0, output_en_lo=0.3, output_en_hi=10.0,
-           add_background=True, poisson=True, exposure=0.0):
+           add_background=True, poisson=True, exposure=0.0, bkg_rate=0.0):
     """ Generate faked light curves.
 
     Notes:
@@ -401,32 +401,33 @@ def fakelc(lc_data, spec_model, rs_in=None, rs_out=None, input_pha=None, input_a
         # exposure time of the background is assumed! Poisson statistic is then
         # added, and the background spectrum is then downscaled to the desired
         # exposure time
-        bkg_rate = bkg.get_dep() * 1.0E6 / bkg.exposure
+        if not bkg_rate:
+            bkg_rate = bkg.get_dep() * 1.0E6 / bkg.exposure
 
-        if poisson:
-            bkg_rate = np.random.poisson(bkg_rate)
+            if poisson:
+                bkg_rate = np.random.poisson(bkg_rate)
+                bkg_rate = bkg_rate * 1.0E-6  # if pha and bkg are not the same, then /bkg.get_backscal()
 
-        bkg_rate = bkg_rate * 1.0E-6  # if pha and bkg are not the same, then /bkg.get_backscal()
+            if rmf is not None:
+                en = (rmf.e_min + rmf.e_max) / 2.0
+            else:
+                en = (arf.energ_lo + arf.energ_hi) / 2.0
 
-        if rmf is not None:
-            en = (rmf.e_min + rmf.e_max) / 2.0
+            mask = np.where(np.logical_and(en >= output_en_lo, en <= output_en_hi))
+            bkg_rate = bkg_rate[mask]
+
+            res['bkg_counts'] = np.ones_like(res['timedel'])
+            res['bkg_counts'] = res['bkg_counts'] * res['timedel'] * np.sum(bkg_rate)
+
+            if poisson:
+                res['bkg_counts'] = np.random.poisson(res['bkg_counts'])
+                res['counts'] = np.random.poisson(np.asarray(ctr) * res['timedel']) + res['bkg_counts']
+            else:
+                res['counts'] = ctr * res['timedel'] + res['bkg_counts']
         else:
-            en = (arf.energ_lo + arf.energ_hi) / 2.0
+            res['bkg_counts'] = np.random.poisson(res['timedel'] * bkg_rate)
+            res['counts'] = np.random.poisson(np.asarray(ctr) * res['timedel']) + res['bkg_counts']
 
-        mask = np.where(np.logical_and(en >= output_en_lo, en <= output_en_hi))
-        bkg_rate = bkg_rate[mask]
-    else:
-        bkg_rate = 0.0
-
-    res['bkg_counts'] = np.ones_like(res['timedel'])
-    res['bkg_counts'] = res['bkg_counts'] * res['timedel'] * np.sum(bkg_rate)
-
-    if poisson:
-        res['bkg_counts'] = np.random.poisson(res['bkg_counts'])
-        res['counts'] = np.random.poisson(np.asarray(ctr) * res['timedel']) + res['bkg_counts']
-    else:
-        res['counts'] = ctr * res['timedel'] + res['bkg_counts']
-
-    res['rate'] = res['counts'] / res['timedel']
+    res['rate'] = (res['counts'] - res['bkg_counts']) / res['timedel']
 
     return res
