@@ -23,9 +23,9 @@ def flux_to_rate(flux, modelfunc, pha=None, arf=None, rmf=None,
         AURSFILE keyword is provided
     rmf: response file. It can be optional. If None and no valid keyword in
         the pha file is found, rmf will be 1.0.
-    input_en_lo: lower energy boundry that the flux is calculated
-    input_en_hi: higher energy boundry that the flux is calculated
-    output_en_lo: lower energy boundry that the rate is calculated. If None,
+    input_en_lo: lower energy bound that the flux is calculated
+    input_en_hi: higher energy bound that the flux is calculated
+    output_en_lo: lower energy bound that the rate is calculated. If None,
         then assuming is the same as the input_en_lo
     output_en_hi: higher energy boundry that the rate is calculated. If None,
         then assuming is the same as the input_en_hi
@@ -78,11 +78,11 @@ def rate_to_flux(rate, modelfunc, pha=None, arf=None, rmf=None,
         AURSFILE keyword is provided
     rmf: response file. It can be optional. If None and no valid keyword in
         the pha file is found, rmf will be 1.0.
-    input_en_lo: lower energy boundry that the rate is estimated
-    input_en_hi: higher energy boundry that the rate is estimated
-    output_en_lo: lower energy boundry that the flux is calculated. If None,
+    input_en_lo: lower energy bound that the rate is estimated
+    input_en_hi: higher energy bound that the rate is estimated
+    output_en_lo: lower energy bound that the flux is calculated. If None,
         then assuming it is the same as the input_en_lo
-    output_en_hi: higher energy boundry that the flux is calculated. If None,
+    output_en_hi: higher energy bound that the flux is calculated. If None,
         then assuming it is the same as the input_en_hi
 
     """
@@ -277,7 +277,7 @@ def transform_redshift(flux, spec_model, rs_in, rs_out,
         Here we assume that the spectrum model and absorption are the same in rs_in and rs_out.
 
         1. first, we obtain the luminosity integrated from v1(1+rs_in) to v2(1+rs_in) in
-        the rest frame, namely, L1 = 4 * pi * Ld1^2
+        the rest frame, namely, L1 = 4 * pi * Ld1^2 * flux; here Ld is luminosity distance.
         2. second, the luminosity L2, integrated from v1(1+rs_out) to v2(1+rs_out) are
         calculated, namely,
         L2 = L1 * [model(v1*(1+rs_out), v2*(1+rs_out)) / model(v1*(1+rs_in), v2*(1+rs_in))]
@@ -288,15 +288,15 @@ def transform_redshift(flux, spec_model, rs_in, rs_out,
         [model(v1*(1+rs_out), v2*(1+rs_out)) / model(v1*(1+rs_in), v2*(1+rs_in))].
 
     Args:
-        flux (np.ndarray or float):  flux or flux list;
+        flux (np.ndarray or float):  flux or flux list observed from source at the input redshift;
         spec_model (astropy.model): the spectrum model;
         rs_in (float): input redshift;
         rs_out (float): output redshift;
-        en_low (float): energy lower boundary;
-        en_high (float): energy upper boundary;
+        en_low (float): energy lower boundary (observed frame);
+        en_high (float): energy upper boundary (observed frame);
 
     Returns:
-        flux in the output redshift (np.ndarray).
+        flux observed from the same source at the output redshift (np.ndarray).
 
     Todo:
         Code needs modification if the input and output energy ranges are different.
@@ -320,7 +320,7 @@ def transform_redshift(flux, spec_model, rs_in, rs_out,
 def fakelc(lc_data, spec_model, rs_in=None, rs_out=None, input_pha=None, input_arf=None,
            input_rmf=None, input_bkg=None, pha=None, arf=None, rmf=None, bkg=None,
            input_en_lo=0.3, input_en_hi=10.0, output_en_lo=0.3, output_en_hi=10.0,
-           add_background=True, poisson=True, exposure=0.0, bkg_rate=0.0):
+           add_background=True, poisson=True, exposure=0.0, bkg_rate=0.0, src2bkg=None):
     """ Generate faked light curves.
 
     Notes:
@@ -344,10 +344,12 @@ def fakelc(lc_data, spec_model, rs_in=None, rs_out=None, input_pha=None, input_a
         input_en_hi (float): energy upper boundary of input lc_data
         output_en_lo (float): energy lower boundary of output lc_data
         output_en_hi (float): energy upper boundary of output lc_data
-        spec_model_origin (astropy.models, or models likewise): spectral model with no absorption
         add_background (bool): add background or not
         poisson (bool): using poisson or not
         exposure (np.ndarray or float): exposure time of this light curve
+        bkg_rate: if not 0.0, then using observed background count rate
+        src2bkg: if not None, then using background count rate from the calibration files,
+                here src2bkg is the ratio of source area to background area.
 
     Returns:
         faked light curve data (dict): {'time':ndarray, 'timedel':ndarray,
@@ -395,6 +397,11 @@ def fakelc(lc_data, spec_model, rs_in=None, rs_out=None, input_pha=None, input_a
     else:
         res['timedel'] = lc_data.get_timedel()
 
+    # time dilation, namely, dt0 = dt1*(1+z), t0 is the observed frame, t1 is the emitted frame (rest frame)
+    rs_dilation_factor = (1+rs_out)/(1+rs_in)
+    res['time'] *= rs_dilation_factor
+    res['timedel'] *= rs_dilation_factor
+
     # TODO: check if the following procedures are correct
     if add_background:
         # Note: to increase the S/N of background spectrum, here a very long
@@ -405,8 +412,11 @@ def fakelc(lc_data, spec_model, rs_in=None, rs_out=None, input_pha=None, input_a
             bkg_rate = bkg.get_dep() * 1.0E6 / bkg.exposure
 
             if poisson:
-                bkg_rate = np.random.poisson(bkg_rate)
-                bkg_rate = bkg_rate * 1.0E-6  # if pha and bkg are not the same, then /bkg.get_backscal()
+                # TODO: here we cannot get the right areascal, so see cal_sens.py (GetResp) for src2bkg
+                if not src2bkg:
+                    src2bkg = input_pha.areascal/input_pha.backscal
+                bkg_rate = np.random.poisson(bkg_rate) * src2bkg
+                bkg_rate = bkg_rate * 1.0E-6
 
             if rmf is not None:
                 en = (rmf.e_min + rmf.e_max) / 2.0
@@ -425,9 +435,15 @@ def fakelc(lc_data, spec_model, rs_in=None, rs_out=None, input_pha=None, input_a
             else:
                 res['counts'] = ctr * res['timedel'] + res['bkg_counts']
         else:
-            res['bkg_counts'] = np.random.poisson(res['timedel'] * bkg_rate)
-            res['counts'] = np.random.poisson(np.asarray(ctr) * res['timedel']) + res['bkg_counts']
+            if poisson:
+                res['bkg_counts'] = np.random.poisson(res['timedel'] * bkg_rate)
+                res['counts'] = np.random.poisson(np.asarray(ctr) * res['timedel']) + res['bkg_counts']
+            else:
+                res['bkg_counts'] = res['timedel'] * bkg_rate
+                res['counts'] = np.asarray(ctr) * res['timedel'] + res['bkg_counts']
 
     res['rate'] = (res['counts'] - res['bkg_counts']) / res['timedel']
 
     return res
+
+
