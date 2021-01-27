@@ -68,6 +68,109 @@ def cal_flux(flux_s: float, flux_e: float, exposure: float, model: classmethod,
     return flux
 
 
+def calc_snr(count_total, count_bkg, radius_src=40, radius_bkg=80, LiMa=False):
+    """
+    Notes:
+        As for so-called LiMa equation, Details see Ti-Pei Li & Yu-Qian Ma 1983, ApJ, 272, 317
+        http://articles.adsabs.harvard.edu/pdf/1983ApJ...272..317L
+    Args:
+        count_total: total count (rate)
+        count_bkg: background count (rate)
+        radius_src: the radius of source region, default 40"
+        radius_bkg:  the radius of background region, default 80"
+        LiMa: Using LiMa equation or not
+
+    Returns:
+        S/N: signal to noise ratio
+
+    """
+    alpha = np.square(radius_src) / np.square(radius_bkg)
+    count_bkg /= alpha
+    if LiMa:
+        snr = np.sqrt(2) * np.sqrt(
+            count_total * np.log((1 + alpha) / alpha * (count_total / (count_total + count_bkg)))
+            + count_bkg * np.log((1 + alpha) * (count_bkg / (count_total + count_bkg))))
+    else:
+        count_bkg_scaled = count_bkg * alpha
+        snr = count_total * 5 / poisson.ppf(0.999999, count_bkg_scaled)
+
+    return snr
+
+
+def get_bkg_count_rate(instrument: str, filter_name=None, threshold=15, radius=40):
+    """
+
+    Args:
+        instrument: pn, mos1, or mos2.
+        filter_name: thin, thick, or medium.
+        threshold: see function 'get_random_lb', default is 15 degree.
+        radius: the radius of source region, default is 40".
+
+    Returns:
+        mean, sigma of the background count rates
+    """
+
+    dir_bkg = './background/'
+    if instrument == 'pn':
+        path_bkg = dir_bkg + 'PN_bkg_info.txt'
+    elif instrument == 'mos1':
+        path_bkg = dir_bkg + 'MOS1_bkg_info.txt'
+    elif instrument == 'mos2':
+        path_bkg = dir_bkg + 'MOS2_bkg_info.txt'
+    else:
+        print('Error! The instrument should be pn, mos1, or mos2!')
+        raise NameError
+
+    bkg = Table.read(path_bkg, format='ascii')
+    column_names = bkg.colnames
+    bkg_dict = {}
+    for i in column_names:
+        bkg_dict[i] = np.array(bkg[i])
+    df_bkg = pd.DataFrame(bkg_dict)
+    df_bkg_full_window = df_bkg[df_bkg['SUBMODE'] != 'PrimeSmallWindow'].reset_index()
+
+    # remove those with |b| < threshold, in unit of degree.
+    lb = SkyCoord(df_bkg_full_window['ra_Deg']*u.degree,
+                  df_bkg_full_window['dec_Deg']*u.degree,
+                  frame='icrs').galactic
+    l, b = lb.l.value, lb.b.value
+    df_bkg_full_window_new = pd.concat([df_bkg_full_window,
+                                        pd.DataFrame({"l_deg": l,
+                                                      "b_deg": b})],
+                                       axis=1, join='outer')
+    df_bkg_full_window_new2 = df_bkg_full_window_new.drop(
+        df_bkg_full_window_new[np.abs(df_bkg_full_window_new['b_deg']) <= threshold].index)
+
+    # depend on filter_name
+    if filter_name == 'medium':
+        count_rate_bkg_raw = df_bkg_full_window_new2[df_bkg_full_window_new['FILTER'] == 'Medium']
+    elif filter_name == 'thin':
+        count_rate_bkg_raw = df_bkg_full_window_new2[df_bkg_full_window_new['FILTER'] == 'Thin1']
+    else:
+        count_rate_bkg_raw = df_bkg_full_window_new2
+
+    radius_scaling_factor = np.square(count_rate_bkg_raw['radius_arcmin'] / radius)
+    count_rate_bkg_mean = np.mean(count_rate_bkg_raw['count_rate'] / radius_scaling_factor)
+    count_rate_bkg_sigma = np.std(count_rate_bkg_raw['count_rate'] / radius_scaling_factor)
+
+    return count_rate_bkg_mean, count_rate_bkg_sigma
+
+
+class MyThread(Thread):
+
+    def __init__(self,func,args):
+        Thread.__init__(self)
+        self.func = func
+        self.args = args
+        self.res = []
+
+    @property
+    def getResult(self):
+        return self.res
+
+    def run(self):
+        self.res.append(self.func(*self.args))
+
 if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
