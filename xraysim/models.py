@@ -430,7 +430,7 @@ class SpecModel(object):
 
 
 class BBSpec(SpecModel):
-    """A class for absobred blackbody spectral model.
+    """A class for absorbed blackbody spectral model.
 
     The model consists of three components: the absorption model, the redshift
     scale factor, and the modified blackbody. The parameters in each of the
