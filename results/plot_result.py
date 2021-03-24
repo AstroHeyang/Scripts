@@ -14,15 +14,22 @@ df = pd.read_csv('redshift.csv', names=obj_names)
 box_data = []
 for x in obj_names:
     box_data.append(df[x])
+    print(np.median(df[x]))
 
 fig, ax = plt.subplots()
-box_plot = ax.boxplot(box_data, vert=False, patch_artist=False, meanline=True,
-                      showfliers=False, labels=obj_names)
+box_plot = ax.boxplot(box_data, vert=False, patch_artist=False,
+                      whis=1000, showfliers=False, labels=obj_names,
+                      boxprops={'color': 'black'})
 
-ax.plot(rs_list, np.arange(1, 13), 'r.', label='initial redshift')
-ax.plot(rs_list_no_random, np.arange(1, 13), 'b*', label='results obtained using original model')
+ax.plot(rs_list, np.arange(1, 13), 'r.', label='Observed redshift')
+ax.plot(rs_list_no_random, np.arange(1, 13), 'b*', label='Simulated redshift using original parameters')
 plt.grid(True, ls='--')
-plt.legend()
+handles, labels = ax.get_legend_handles_labels()
+handles.append(box_plot["boxes"][0])
+# handles.append(box_plot["medians"][0])
+labels.append('Simulated redshift using random parameters')
+# labels.append('Median simulated redshift using random parameters')
+plt.legend(handles, labels)
 ax.set_xlabel('redshift')
 
 plt.savefig('result.jpg', dpi=1000, bbox_inches='tight')
