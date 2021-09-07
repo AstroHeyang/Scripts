@@ -19,7 +19,7 @@ from astropy.io import fits
 from astropy.coordinates import SkyCoord
 from astropy.stats import bayesian_blocks
 from astropy.table import Table
-from xraysim import models as mo
+from xraysim.models_astro import BBSpec
 from xraysim.astroio.read_data import read_arf, read_rmf, read_pha, read_lc
 from xraysim.utils.simtools import fakespec
 from xraysim.utils import simtools
@@ -101,6 +101,7 @@ __author__ = 'He-Yang Liu'
             
 """
 
+VignettingFactor = 0.5
 
 class GetResp(object):
     """To get the x-ray calibration matrix, including arf, rmf, pha and background """
@@ -130,6 +131,112 @@ class GetResp(object):
             This function should be modified along with the file name.
 
         """
+        base_name = self.caldb_dir + '/' + self._satellite.lower() + '/' + self._instrument.lower()
+        if self._filter_name:
+            base_name += '-' + self._filter_name.lower()
+
+        if self._ao:
+            base_name += '-' + 'ao' + str(self._ao)
+
+        res = dict()
+
+        res['pha'] = base_name + '.pi'
+        res['arf'] = base_name + '.arf'
+        res['rmf'] = base_name + '.rmf'
+        res['bkg'] = base_name + '.pi'
+
+        for key, value in res.items():
+            if not os.path.exists(value):
+
+                # Note: this is written particularly for files with names like those in the 'caldb_dir',
+                #       so if the names are changed, these code also should be modified accordingly.
+                if value.find('.pi') != -1:
+                    substitute = value[:value.index('ao')] + 'ao19.pi'
+                    res['pha'] = substitute
+                    res['bkg'] = substitute
+                    # print(f"{value} not found! This 'pi' file would be replaced by "
+                    #       f"{substitute}!")
+                else:
+                    print(f"{value} not found! Please check it again!")
+                    raise FileNotFoundError
+
+        return res
+
+    @property
+    def response(self) -> tuple:
+        resp_dict = self._get_resp_files()
+        pha = read_pha(resp_dict['pha'])
+        arf = read_arf(resp_dict['arf'])
+        rmf = read_rmf(resp_dict['rmf'])
+        bkg = read_pha(resp_dict['bkg'])
+        return pha, arf, rmf, bkg
+
+    # this method is useful if using bkg file like '.pi' to get the src2bkg rate; else we would use
+    # the observed event files, then (40/80)^2 would be adopted, see function 'get_bkg_count_rate_observation'.
+    @property
+    def src_bkg_area_ratio(self, radius_src=1/60) -> float:
+        bkg_file = self._get_resp_files()['bkg']
+        with fits.open(bkg_file) as hdul:
+            bkg_header = hdul[0].header
+            deg2pixel_y = np.abs(bkg_header['REFYCDLT'])
+            deg2pixel_x = np.abs(bkg_header['REFXCDLT'])
+            radius_bkg = hdul[3].data[0][3]
+            area_bkg = np.square(radius_bkg) * deg2pixel_y * deg2pixel_x
+            area_src = np.square(radius_src)
+        return area_src/area_bkg
+
+
+class GetRespVignetting(object):
+    """To get the x-ray calibration matrix, including arf and rmf from the observed
+    XMM Newton data"""
+
+    # Define the base directory for the calibration files.
+    caldb_dir = './ccf/arf_rmf_random/'
+
+    def __init__(self, satellite, instrument=None, filter_name=None, ao=None):
+        """
+
+        Args:
+            satellite: Name of the satellite, e.g., xmm_newton
+            instrument: Name of the instrument, e.g., pn
+            filter_name: Name of the filter, e.g., thick
+            ao: Name of the Announcement of Opportunity, e.g, 19
+
+        """
+        self._satellite = satellite
+        self._instrument = instrument
+        self._filter_name = filter_name
+        self._ao = ao
+
+    @staticmethod
+    def get_random_angle():
+        # off-axis angle, in units of arcmin
+        angles = np.linspace(0, 15, 100, endpoint=True)
+        weight = np.square(angles)
+        angle = np.random.choice(angles, weights=weight)
+        return angle
+
+    def get_random_file(self):
+        files = ['0149780101', '0203560201', '0300240501', '0300930301',
+                 '0502020101', '0604740101', '0675010401', '0743650701',
+                 '0760380201', '0765041301', '0770380401', '0781890401']
+
+        index = np.choice(np.arange(len(files)))
+        file = files[index]
+        path = self.caldb_dir + file
+        info_file = self.caldb_dir + 'info/info_' + file + '.txt'
+        pd.read_csv(info_file, )
+
+        base_name = path + self._instrument.upper() + '_' + str(get_random_angle)
+
+    def _get_resp_files(self) -> dict:
+        """
+
+        Notes:
+            This function should be modified along with the file name.
+
+        """
+
         base_name = self.caldb_dir + '/' + self._satellite.lower() + '/' + self._instrument.lower()
         if self._filter_name:
             base_name += '-' + self._filter_name.lower()
@@ -216,7 +323,8 @@ def get_bkg_count_rate_observation(bkg_file=None, instrument=None, src2bkg=0.25)
 
 
 def generate_lc(satellite: str, instrument: str, filter_name: str, ao: int,
-                nh_gal=None, nh_host=None, alpha=None, temperature=None,
+                nh_gal_in=None, nh_gal_out=None, nh_host_in=None, nh_host_out=None,
+                alpha=None, temperature=None,
                 coordinates=None, rs_in=0.0, rs_out=0.0, lc_file=None,
                 bkg_rate=0, poisson=True, src2bkg=None) -> dict:
     """generate fake light curve at rs_out
@@ -226,8 +334,10 @@ def generate_lc(satellite: str, instrument: str, filter_name: str, ao: int,
         instrument: Name of the instrument, e.g., pn, mos1, mos2
         filter_name: Name of the filter, e.g., thick, thin, med
         ao: Name of the Announcement of Opportunity, e.g, 19
-        nh_gal: The Galactic column density, in unit of 1e22 cm^-2
-        nh_host: The host galaxy column density, in unit of 1e22 cm^-2
+        nh_gal_in: The Galactic column density for input spectrum, in unit of 1e22 cm^-2
+        nh_host_in: The host galaxy column density for input spectrum, in unit of 1e22 cm^-2
+        nh_gal_out: The Galactic column density for output spectrum, in unit of 1e22 cm^-2
+        nh_host_out: The host galaxy column density for output spectrum, in unit of 1e22 cm^-2
         alpha: powerlaw index (X-ray spectrum model, optional)
         temperature: temperature of black body model (X-ray spectrum model, default)
         coordinates: Galactic coordinates, (l, b), in units of degrees
@@ -239,7 +349,7 @@ def generate_lc(satellite: str, instrument: str, filter_name: str, ao: int,
         src2bkg: the ratio between source area and background area
 
     Returns:
-        lc: A fake lightcurve, in format of dict: {'time':ndarray, 'timedel':ndarray,
+        lc: A fake lightcurve, in format of dict: {'flux':ndarray, 'time':ndarray, 'timedel':ndarray,
         'bkg_counts': ndarray, 'counts': ndarray, 'rate':ndarray}
 
     """
@@ -266,19 +376,7 @@ def generate_lc(satellite: str, instrument: str, filter_name: str, ao: int,
     snb_lc.flux[negative_index] = 0.0
 
     # Define model and set up the parameter values
-    if not nh_gal:
-        if coordinates:
-            galactic_coordinates = SkyCoord(l=coordinates[0], b=coordinates[1],
-                                            unit="deg", frame='galactic')
-            nh_gal = GasMap.nh(galactic_coordinates, nhmap="LAB").value / 1e22
-        else:
-            nh_gal = np.random.uniform(1.9, 11.201) / 100  # in the range of 1.9e20-11.2e20
 
-    if not nh_host:
-        nh_host_1 =  np.random.uniform(0.01, 4.71)
-        nh_host_2 = 1e-5
-        # in the range of 0.01e22-4.7e22 or 1e17 (namely, no host absorption)
-        nh_host = np.random.choice((nh_host_1, nh_host_2))
     if not rs_out:
         rs_out = np.random.uniform(0.01, 2.01)
     if not alpha:
@@ -286,13 +384,40 @@ def generate_lc(satellite: str, instrument: str, filter_name: str, ao: int,
     if not temperature:
         temperature = np.random.uniform(130, 930.1)  # T in the range of [0.13, 0.93] * u.keV
 
-    # default spectral model: blackbody
-    # mo_spec = mo.PLSpec(nh_gal=nh_gal, nh_host=nh_host, rs=rs_in, alpha=alpha)
-    mo_spec = mo.BBSpec(nh_gal=nh_gal, nh_host=nh_host, rs=rs_in, temperature=temperature)
+    if not nh_host_in:
+        nh_host_in = 1e-5
+    # here we fixed the nh_host_out to nh_host_in
+    if not nh_host_out:
+        nh_host_out = nh_host_in
+    """
+    if not nh_host_out:
+        nh_host_1 = np.random.uniform(0.01, 4.71)
+        nh_host_2 = 1e-5
+        # in the range of 0.01e22-4.7e22 or 1e17 (namely, no host absorption)
+        nh_host_out = np.random.choice((nh_host_1, nh_host_2))
+    """
 
-    fake_lc = simtools.fakelc(snb_lc, mo_spec.model, rs_in=rs_in, rs_out=rs_out, input_pha=pha,
+    if not nh_gal_in:
+        nh_gal_in = nh_host_out
+    if not nh_gal_out:
+        if coordinates:
+            galactic_coordinates = SkyCoord(l=coordinates[0], b=coordinates[1],
+                                            unit="deg", frame='galactic')
+            nh_gal_out = GasMap.nh(galactic_coordinates, nhmap="LAB").value / 1e22
+        else:
+            nh_gal_out = np.random.uniform(1.9, 11.201) / 100  # in the range of 1.9e20-11.2e20
+
+    # default spectral model: blackbody
+    # mo_spec_in = mo.PLSpec(nh_gal=nh_gal, nh_host=nh_host, rs=rs_in, alpha=alpha)
+    # mo_spec_out = mo.PLSpec(nh_gal=nh_gal, nh_host=nh_host, rs=rs_out, alpha=alpha)
+    mo_spec_in = BBSpec(nh_gal=nh_gal_in, nh_host=nh_host_in, rs=rs_in, temperature=temperature)
+    mo_spec_out = BBSpec(nh_gal=nh_gal_out, nh_host=nh_host_out, rs=rs_out, temperature=temperature)
+
+    fake_lc = simtools.fakelc(snb_lc, mo_spec_in.model, mo_spec_out.model,
+                              rs_in=rs_in, rs_out=rs_out, input_pha=pha,
                               input_arf=arf, input_rmf=rmf, input_bkg=bkg, pha=pha, poisson=poisson,
-                              rmf=rmf, arf=arf, bkg=bkg, bkg_rate=bkg_rate, src2bkg=src2bkg)
+                              rmf=rmf, arf=arf, bkg=bkg, bkg_rate=bkg_rate, src2bkg=src2bkg,
+                              vignetting_factor=VignettingFactor)
 
     return fake_lc
 
@@ -319,11 +444,13 @@ def lc_rebin(lc: dict, bin_method=None, bin_size=60, bin_size_raw=4) -> dict:
     counts_series = lc['counts']
     time_delta_series = lc['timedel']
     counts_bkg_series = lc['bkg_counts']
+    flux_series = lc['flux']
 
     time_series_new = []
     time_delta_series_new = []
     counts_series_new = []
     counts_bkg_series_new = []
+    flux_series_new = []
 
     if bin_method == 'dynamic':
         counts_current = 0
@@ -348,6 +475,7 @@ def lc_rebin(lc: dict, bin_method=None, bin_size=60, bin_size_raw=4) -> dict:
             time_series_new.append(np.sum(time_delta_series[:index_list[j + 1]]))
             time_delta_series_new.append(np.sum(time_delta_series[index_list[j]:index_list[j + 1]]))
             counts_series_new.append(np.sum(counts_series[index_list[j]:index_list[j + 1]]))
+            flux_series_new.append(np.sum(flux_series[index_list[j]:index_list[j + 1]]))
             counts_bkg_series_new.append(np.sum(counts_bkg_series[index_list[j]:index_list[j + 1]]))
 
     if bin_method == 'fixed':
@@ -368,10 +496,12 @@ def lc_rebin(lc: dict, bin_method=None, bin_size=60, bin_size_raw=4) -> dict:
         for i in range(len(index_list)-1):
             time_delta_series_new.append(np.sum(time_delta_series[index_list[i]:index_list[i+1]]))
             counts_series_new.append(np.sum(counts_series[index_list[i]:index_list[i+1]]))
+            flux_series_new.append(np.sum(flux_series[index_list[i]:index_list[i+1]]))
             counts_bkg_series_new.append(np.sum(counts_bkg_series[index_list[i]:index_list[i+1]]))
 
         time_delta_series_new.append(np.sum(time_delta_series[index_list[i]:]))
         counts_series_new.append(np.sum(counts_series[index_list[i]:]))
+        flux_series_new.append(np.sum(flux_series[index_list[i]:]))
         counts_bkg_series_new.append(np.sum(counts_bkg_series[index_list[i]:]))
         time_series_new = np.cumsum([0] + time_delta_series_new)[:-1] + np.array(time_delta_series_new)/2
 
@@ -380,7 +510,8 @@ def lc_rebin(lc: dict, bin_method=None, bin_size=60, bin_size_raw=4) -> dict:
                  'bkg_counts': np.array(counts_bkg_series_new),
                  'counts': np.array(counts_series_new),
                  'rate': (np.array(counts_series_new)-np.array(counts_bkg_series_new))
-                         / np.array(time_delta_series_new)}
+                         / np.array(time_delta_series_new),
+                 'flux': np.array(flux_series_new)}
 
     return lc_binned
 
@@ -473,9 +604,17 @@ def get_random_lb(threshold: float) -> tuple:
     return l, b
 
 
-def cal_redshift(lc_file: str, rs_in: float, satellite=None, instrument=None, filter_name=None,
-                 ao=None, nh_gal=None, nh_host=None, alpha=None, temperature=None,
-                 LiMa=False, bin_size=None, poisson=False,
+def get_galactic_nh(file=None):
+    if not file:
+        file = 'nh.txt'
+    df = pd.read_csv(file)
+    nh = np.power(10, df['nh']) / 1e22  # in units of 10^-22 cm^-2
+    return nh
+
+
+def cal_redshift(lc_file: str, rs_in: float, rs_range=None, satellite=None, instrument=None, filter_name=None,
+                 ao=None, nh_gal_in=None, nh_host_in=None, nh_gal_out=None, nh_host_out=None,
+                 alpha=None, temperature=None, LiMa=False, bin_size=None, poisson=False,
                  save_res=False, plot_res=False, index_obj=None) -> float:
     """Roughly find the maximum redshift where the source could be detected.
 
@@ -495,8 +634,10 @@ def cal_redshift(lc_file: str, rs_in: float, satellite=None, instrument=None, fi
         instrument (list): instrument list, e.g, ['pn', 'mos1', 'mos2']
         filter_name (str): the name of filter, e.g., 'thick-5'
         ao (int): e.g., 7, 8, 10, 13, 14, 18, 19
-        nh_gal: The Galactic column density, in unit of 1e22 cm^-2
-        nh_host: The host galaxy column density, in unit of 1e22 cm^-2
+        nh_gal_in: The Galactic column density for input spectrum, in unit of 1e22 cm^-2
+        nh_host_in: The host galaxy column density for input spectrum, in unit of 1e22 cm^-2
+        nh_gal_out: The Galactic column density for output spectrum, in unit of 1e22 cm^-2
+        nh_host_out: The host galaxy column density for output spectrum, in unit of 1e22 cm^-2
         alpha: powerlaw index (X-ray spectrum model, optional)
         temperature: temperature of black body model (X-ray spectrum model, default)
         LiMa: use LiMa formula to calculate the S/N or not
@@ -514,12 +655,18 @@ def cal_redshift(lc_file: str, rs_in: float, satellite=None, instrument=None, fi
 
     """
 
-    rs_min = rs_in*0.8
-    rs_max = rs_in*3.0
-    rs_list = np.linspace(rs_min, rs_max, num=100, endpoint=True)
+    if not rs_range:
+        rs_min = rs_in * 0.8
+        rs_max = rs_in * 2.5
+    else:
+        rs_min = rs_range[0]
+        rs_max = rs_range[1]
+
+    rs_list = np.linspace(rs_min, rs_max, num=30, endpoint=True)
 
     if not instrument:
         instrument = ('pn', 'mos1', 'mos2')
+
     l, b = get_random_lb(15)  # |b| > 15 degree
 
     tqdm_range = tqdm(rs_list)
@@ -539,8 +686,9 @@ def cal_redshift(lc_file: str, rs_in: float, satellite=None, instrument=None, fi
                 count_rate_bkg = max(count_rate_bkg_raw, 2e-3)  # ensure ctr > 0
 
             fake_lc = generate_lc(satellite, ins, filter_name, ao, lc_file=lc_file,
-                                  coordinates=(l, b), rs_in=rs_in, rs_out=rs, nh_gal=nh_gal,
-                                  nh_host=nh_host, alpha=alpha, temperature=temperature,
+                                  coordinates=(l, b), rs_in=rs_in, rs_out=rs, nh_gal_in=nh_gal_in,
+                                  nh_gal_out=nh_gal_out, nh_host_in=nh_host_in,
+                                  nh_host_out=nh_host_out, alpha=alpha, temperature=temperature,
                                   bkg_rate=count_rate_bkg, poisson=poisson)
 
             fake_lc_binned = lc_rebin(fake_lc, bin_method='fixed', bin_size=bin_size)
@@ -717,7 +865,8 @@ def plot_lc_total(obs_id=None, filter_type='thin-5', ao=19, title=None, mos1=Tru
     plt.legend()
     # file_name = lc_dir + obs_id + '_total.jpg'
     file_name = obs_id + '_total.jpg'
-    plt.savefig(file_name, dpi=1200, bbox_inch='tight')
+
+    # plt.savefig(file_name, dpi=1200, bbox_inch='tight')
 
 
 """This part is used to test this program (end)"""
@@ -761,24 +910,80 @@ def main(res_file):
     return None
 
 
+def main_nh(res_file, nh):
+    """The main function of this script if use given Galactic nh
+
+    Args:
+        res_file: file used to record the result
+
+    Returns:
+        None
+
+    """
+    satellite = 'xmm_newton'
+    filter_name = np.random.choice(['thin-5', 'med-5', 'thick-5'], p=(13.8/22.4, 7.6/22.4, 1/22.4))
+    ao = np.random.choice([13, 14, 16, 17, 18, 19])
+    lc_file_list = glob.glob('./lc/*.txt')
+    lc_file_list.sort()
+
+    df_infos = get_obs_infos()
+    bin_sizes = np.array(df_infos['bin_size'])
+    rs_list = np.array(df_infos['redshift'])
+    temperature_list = np.array(df_infos['bb_T']) * 1e3
+    nh_gal_list = df_infos['nh_gal'] * 1e-2
+    nh_host_list = df_infos['nh_host'] * 1e-2
+
+    """
+    rs_ranges = [[1.5, 2.5], [0.5, 0.75], [0.3, 0.5], [0.2, 0.5],
+                 [0.5, 0.8], [0.1, 0.3], [0.1, 0.3], [0.5, 0.9],
+                 [0.2, 0.7], [0.3, 0.6], [0.6, 1.1], [0.2, 0.4]]
+    """
+    rs_ranges = [[1.0, 2.2], [0.3, 0.7], [0.1, 0.45], [0.1, 0.45],
+                 [0.3, 0.8], [0.05, 0.3], [0.05, 0.25], [0.3, 0.8],
+                 [0.1, 0.6], [0.2, 0.5], [0.4, 1.0], [0.1, 0.35]]
+
+    rs_out = [nh]
+    for lc_file, rs_in, bin_size, temperature, rs_range, nh_gal_in, nh_host_in in zip(lc_file_list, rs_list,
+                                                                                      bin_sizes, temperature_list,
+                                                                                      rs_ranges, nh_gal_list,
+                                                                                      nh_host_list):
+        rs = cal_redshift(lc_file, rs_in, rs_range=rs_range, satellite=satellite,
+                          nh_gal_in=nh_gal_in, nh_gal_out=nh, nh_host_in=nh_host_in,
+                          nh_host_out=None,
+                          filter_name=filter_name, ao=ao, bin_size=bin_size,
+                          temperature=temperature, LiMa=True, poisson=True)
+
+        rs_out.append(rs)
+
+    with open(res_file, 'a', newline='') as f:
+        f_csv = csv.writer(f)
+        f_csv.writerow(rs_out)
+
+    return None
+
+
 if __name__ == '__main__':
     res_file = './results/redshift.csv'
 
+    # resp = GetResp(satellite='xmm_newton', instrument='pn', filter_name='thin-5', ao=19).response
     """
     # single process
     time_start = time.time()
-    main(res_file)
+    nh_galactic_list = get_galactic_nh()
+    main_nh(res_file, nh=nh_galactic_list[0])
     time_end = time.time()
     print(f"Time consumed {time_end - time_start} s.")
     """
 
     # multiprocessing using Process
     time_start = time.time()
-    number_simulation = 5
+    number_simulation = 3
     subprocesses = []
+    nh_list = get_galactic_nh()
     for _ in range(number_simulation):
-        p = Process(target=main, args=(res_file,))
-        subprocesses.append(p)
+        for nh in nh_list:
+            p = Process(target=main_nh, args=(res_file, nh,))
+            subprocesses.append(p)
     for p in subprocesses:
         p.start()
     for p in subprocesses:

@@ -10,7 +10,7 @@ obj_names = np.array(df_infos['obj_name'])
 rs_list = np.array(df_infos['redshift'])
 rs_list_no_random = np.array([2.44, 0.7, 0.46, 0.35, 0.91, 0.25, 0.21, 0.72, 0.58, 0.46, 1.01, 0.34])
 
-df = pd.read_csv('redshift.csv', names=obj_names)
+df = pd.read_csv('redshift.csv', names=['nh'] + list(obj_names))
 box_data = []
 for x in obj_names:
     box_data.append(df[x])
@@ -27,9 +27,35 @@ plt.grid(True, ls='--')
 handles, labels = ax.get_legend_handles_labels()
 handles.append(box_plot["boxes"][0])
 # handles.append(box_plot["medians"][0])
-labels.append('Simulated redshift using random parameters')
+labels.append('Simulated redshift')
 # labels.append('Median simulated redshift using random parameters')
 plt.legend(handles, labels)
 ax.set_xlabel('redshift')
 
-plt.savefig('result.jpg', dpi=1000, bbox_inches='tight')
+plt.savefig('result_nh.jpg', dpi=1000, bbox_inches='tight')
+
+
+fig, ax = plt.subplots()
+ax.set_ylabel(r'z$_{max}$')
+ax.set_xlabel(r'log n$\rm _{H,gal}$ (cm$^{-2}$)')
+symbols = ['.-', 'o-', 'v-', '^-', '<-', '>-',
+           's-', 'p-', '*-', 'h-', '*-', 'd-']
+
+x = df['nh'].drop_duplicates(inplace=False)
+x = x.sort_values(inplace=False)
+x = x.apply(lambda i: np.log10(i) + 22)
+# x = np.log10(x.sort_values(inplace=False)) + 22
+
+y = df.groupby('nh', as_index=False).mean()
+y['nh'] = y['nh'].apply(lambda i: np.log10(i) + 22)
+y.to_csv('nh_z.txt', index=False)
+for source, symbol in zip(obj_names, symbols):
+    ax.plot(x, y[source], symbol, label=source)
+
+
+plt.legend(bbox_to_anchor=(1.05, 1), loc=2, borderaxespad=0)
+
+plt.savefig('result_nh2.jpg', dpi=1000, bbox_inches='tight')
+
+
+

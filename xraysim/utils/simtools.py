@@ -9,7 +9,7 @@ from astropy.modeling import models
 def flux_to_rate(flux, modelfunc, pha=None, arf=None, rmf=None,
                  input_en_lo=0.3, input_en_hi=10.0,
                  output_en_lo=None, output_en_hi=None,
-                 photon_flux=False):
+                 photon_flux=False, vignetting_factor=1):
     """
     Convert a given flux to counts rate. Instrument response file must be
     provided.
@@ -37,7 +37,7 @@ def flux_to_rate(flux, modelfunc, pha=None, arf=None, rmf=None,
         flux = np.asarray(flux)
 
     if modelfunc is None:
-        raise Exception('No model is defeined. A model must be provided!')
+        raise Exception('No model is defined. A model must be provided!')
 
     if output_en_lo is None: output_en_lo = input_en_lo
     if output_en_hi is None: output_en_hi = input_en_hi
@@ -58,7 +58,8 @@ def flux_to_rate(flux, modelfunc, pha=None, arf=None, rmf=None,
         rate = calculate_model_rate(modelfunc=modelfunc,
                                     pha=pha, arf=arf, rmf=rmf,
                                     model_en_lo=output_en_lo,
-                                    model_en_hi=output_en_hi)[1]
+                                    model_en_hi=output_en_hi,
+                                    vignetting_factor=vignetting_factor)[1]
         rate *= scale
         res.append(rate)
     return res
@@ -108,7 +109,8 @@ def rate_to_flux(rate, modelfunc, pha=None, arf=None, rmf=None,
 
 
 def calculate_model_rate(modelfunc, pha=None, arf=None, rmf=None,
-                         model_en_lo=0.3, model_en_hi=10.0):
+                         model_en_lo=0.3, model_en_hi=10.0,
+                         vignetting_factor=1):
     if pha is None and arf is None:
         raise Exception("No response file is defined!")
     elif arf is None:
@@ -134,7 +136,7 @@ def calculate_model_rate(modelfunc, pha=None, arf=None, rmf=None,
 
     en_arf = (arf.energ_lo + arf.energ_hi) / 2.0
     en_del = arf.energ_hi - arf.energ_lo
-    rate = np.dot(modelfunc(en_arf) * arf.specresp * en_del, matrix)
+    rate = np.dot(modelfunc(en_arf) * arf.specresp * en_del * vignetting_factor, matrix)
     mask = np.where(np.logical_and(en_rmf >= model_en_lo,
                                    en_rmf <= model_en_hi))
     rate = rate[mask]
@@ -162,10 +164,10 @@ def calculate_model_flux(model, low, hi, num=10000, log=False,
             for the given model.
     """
     # TODO: currently, the integrate function in scipy is not very efficient in
-    # integrating the absobed model, likely due to the complexity of the Phabs
-    # model. Try to optimise the Phabs model may help improve the efficiency.
-    # So if the absorbed flux is calculated and nh i not zero, then numerical
-    # solution will be used rather than using the scipy integrate method.
+    #       integrating the absorbed model, likely due to the complexity of the Phabs
+    #       model. Try to optimise the Phabs model may help improve the efficiency.
+    #       So if the absorbed flux is calculated and nh i not zero, then numerical
+    #       solution will be used rather than using the scipy integrate method.
     keV2erg = u.keV.to(u.erg)
 
     if scipy_inte:
@@ -269,7 +271,7 @@ def fakespec(pha=None, arf=None, rmf=None, bkg=None, add_background=True,
     return model_spec
 
 
-def transform_redshift(flux, spec_model, rs_in, rs_out,
+def transform_redshift(flux, spec_model_in, spec_model_out, rs_in, rs_out,
                        en_low=0.3, en_high=10.0):
     """calculate the flux when one object was moved from z1 to z2
 
@@ -289,7 +291,8 @@ def transform_redshift(flux, spec_model, rs_in, rs_out,
 
     Args:
         flux (np.ndarray or float):  flux or flux list observed from source at the input redshift;
-        spec_model (astropy.model): the spectrum model;
+        spec_model_in (astropy.model): the input spectrum model, e.g. zbbody(rs_in);
+        spec_model_out (astropy.model): the output spectrum model, e.g. zbbody(rs_out);
         rs_in (float): input redshift;
         rs_out (float): output redshift;
         en_low (float): energy lower boundary (observed frame);
@@ -305,22 +308,24 @@ def transform_redshift(flux, spec_model, rs_in, rs_out,
     if not isinstance(flux, np.ndarray):
         flux = np.asarray(flux)
 
-    # first, corrected for redshift
-    scale_distance = np.square(cosmo.luminosity_distance(rs_in) / cosmo.luminosity_distance(rs_out))
+    # first, corrected for distance
+    # photon flux is used, so here is proper distance, not luminosity distance
+    scale_distance = np.square(cosmo.comoving_distance(rs_in) / cosmo.comoving_distance(rs_out))
     flux_redshifted = flux * scale_distance.value
 
     # second, corrected for energy band
-    scale_energy = calculate_model_flux(spec_model, en_low * (1 + rs_out), en_high * (1 + rs_out))['flux'] / \
-        calculate_model_flux(spec_model, en_low * (1 + rs_in), en_high * (1 + rs_in))['flux']
+    scale_energy = calculate_model_flux(spec_model_out, en_low, en_high)['flux'] / \
+        calculate_model_flux(spec_model_in, en_low, en_high)['flux']
     flux_redshifted *= scale_energy
 
     return flux_redshifted
 
 
-def fakelc(lc_data, spec_model, rs_in=None, rs_out=None, input_pha=None, input_arf=None,
+def fakelc(lc_data, spec_model_in, spec_model_out, rs_in=None, rs_out=None, input_pha=None, input_arf=None,
            input_rmf=None, input_bkg=None, pha=None, arf=None, rmf=None, bkg=None,
            input_en_lo=0.3, input_en_hi=10.0, output_en_lo=0.3, output_en_hi=10.0,
-           add_background=True, poisson=True, exposure=0.0, bkg_rate=0.0, src2bkg=None):
+           add_background=True, poisson=True, exposure=0.0, bkg_rate=0.0, src2bkg=None,
+           vignetting_factor=0.75):
     """ Generate faked light curves.
 
     Notes:
@@ -329,7 +334,8 @@ def fakelc(lc_data, spec_model, rs_in=None, rs_out=None, input_pha=None, input_a
 
     Args:
         lc_data (class): original light curve data, see DataLC in astrodata.py
-        spec_model (astropy.models, or models likewise): spectrum model, e.g. powerlaw or blackbody
+        spec_model_in (astropy.models, or models likewise): input spectrum model, e.g. powerlaw or blackbody
+        spec_model_out (astropy.models, or models likewise): output spectrum model, e.g. powerlaw or blackbody
         rs_in (float): redshift of input lc_data
         rs_out (float): redshift of output lc_data
         input_pha: calibration files of input lc_data
@@ -350,6 +356,7 @@ def fakelc(lc_data, spec_model, rs_in=None, rs_out=None, input_pha=None, input_a
         bkg_rate: if not 0.0, then using observed background count rate
         src2bkg: if not None, then using background count rate from the calibration files,
                 here src2bkg is the ratio of source area to background area.
+        vignetting_factor: a factor used to model the vignetting
 
     Returns:
         faked light curve data (dict): {'time':ndarray, 'timedel':ndarray,
@@ -370,26 +377,30 @@ def fakelc(lc_data, spec_model, rs_in=None, rs_out=None, input_pha=None, input_a
 
     res = {}
     if lc_data.flux is not None:
-        flux_raw = lc_data.flux
-        flux = transform_redshift(flux_raw, spec_model, rs_in, rs_out,
+        flux_raw = lc_data.flux  # energy flux in the observed frame
+        flux = transform_redshift(flux_raw, spec_model_in, spec_model_out, rs_in, rs_out,
                                   en_low=input_en_lo, en_high=input_en_hi)
-
+        res['flux'] = flux
     # TODO: if lc_data.counts, these should be modified for redshift correction.
     elif lc_data.counts is not None:
-        flux = rate_to_flux(lc_data.counts / lc_data.get_timedel(), modelfunc,
-                            pha=input_pha, arf=input_arf, rmf=input_rmf,
-                            input_en_lo=input_en_lo,
-                            input_en_hi=input_en_hi)
+        flux_raw = rate_to_flux(lc_data.counts / lc_data.get_timedel(), spec_model_in,
+                                pha=input_pha, arf=input_arf, rmf=input_rmf,
+                                input_en_lo=input_en_lo,
+                                input_en_hi=input_en_hi)
+        flux = transform_redshift(flux_raw, spec_model_in, spec_model_out, rs_in, rs_out,
+                                  en_low=input_en_lo, en_high=input_en_hi)
+
     else:
         print("Error: No counts/rate/flux column is found in the lc file")
 
-    ctr = flux_to_rate(flux, spec_model,
+    ctr = flux_to_rate(flux, spec_model_out,
                        pha=pha, arf=arf, rmf=rmf,
                        input_en_lo=input_en_lo,
                        input_en_hi=input_en_hi,
                        output_en_lo=output_en_lo,
                        output_en_hi=output_en_hi,
-                       photon_flux=False)
+                       photon_flux=False,
+                       vignetting_factor=vignetting_factor)
 
     res['time'] = lc_data.time
     if exposure > 0:
